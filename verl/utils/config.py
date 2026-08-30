@@ -169,6 +169,8 @@ def validate_config(
     if config.algorithm.get("use_kl_in_reward", False) and config.actor_rollout_ref.actor.use_kl_loss:
         print("NOTICE: You have both enabled in-reward kl and kl loss.")
 
+    _validate_selective_training(config, use_reference_policy)
+
     # critic
     if use_critic:
         critic_config = omega_conf_to_dataclass(config.critic)
@@ -200,3 +202,47 @@ def validate_config(
         get_vllm_max_lora_rank(lora_rank)
 
     print("[validate_config] All configuration checks passed successfully!")
+
+
+def _validate_selective_training(config: DictConfig, use_reference_policy: bool) -> None:
+    """Refuse the two combinations that train the wrong thing without saying so.
+
+    Unfreezing base weights underneath LoRA is legitimate, but it breaks two assumptions
+    the LoRA path is built on, and neither breakage raises on its own:
+
+    1. Rollout weight sync. With lora.merge False, fsdp_utils.collect_lora_params returns
+       get_peft_model_state_dict once base_sync_done is True -- adapter tensors only. The
+       unfrozen base layers train in the actor and are never transferred, so from step 2
+       the sampling policy and the trained policy are different models. GRPO's rollout
+       correction assumes numeric drift between engines, not different weights.
+
+    2. The KL reference. ref_in_actor computes it as the actor with adapters disabled,
+       which is the original model only while the base is frozen. Unfreeze it and the
+       reference contains the training, so the unfrozen layers -- the highest-variance
+       part of the model -- end up with no constraint at all.
+
+    Both produce a run that logs healthy numbers and optimises the wrong objective, so
+    they are startup errors rather than warnings.
+    """
+    model = config.actor_rollout_ref.model
+    if not (model.get("unfreeze_last_n_layers", 0) > 0 or model.get("unfreeze_patterns")):
+        return
+
+    lora_rank = model.get("lora", {}).get("rank", 0)
+    if lora_rank <= 0:
+        lora_rank = model.get("lora_rank", 0)
+    if lora_rank <= 0 and model.get("lora_adapter_path") is None:
+        return
+
+    assert model.get("lora", {}).get("merge", False), (
+        "model.unfreeze_* under LoRA requires actor_rollout_ref.model.lora.merge=True. "
+        "Without it only adapter tensors are synced to the rollout engine, so the base "
+        "layers you unfroze train in the actor and never reach vLLM."
+    )
+    if use_reference_policy:
+        assert model.get("ref_in_actor") is False, (
+            "model.unfreeze_* under LoRA requires actor_rollout_ref.model.ref_in_actor=False. "
+            "Otherwise the KL reference is the actor with adapters disabled, which now "
+            "contains the base-weight training the KL term is meant to measure against, "
+            "leaving those layers unconstrained."
+        )
