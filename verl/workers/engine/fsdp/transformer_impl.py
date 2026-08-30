@@ -579,6 +579,33 @@ class FSDPEngine(BaseEngine):
         if self._is_lora:
             module = self._build_lora_module(module)
 
+        # Selective freeze/unfreeze (training only).
+        #
+        # Position is load-bearing in both directions: AFTER _build_lora_module, because
+        # get_peft_model freezes every base parameter and would undo an earlier unfreeze;
+        # BEFORE _build_fsdp_module, because FSDP2 replaces parameters with DTensor shards
+        # and flipping requires_grad on those does not do what it looks like it does.
+        if not self.engine_config.forward_only:
+            from verl.utils.param_groups import apply_param_groups, format_report
+
+            report = apply_param_groups(
+                module,
+                hf_config=self.model_config.hf_config,
+                freeze_patterns=self.model_config.freeze_patterns,
+                unfreeze_last_n_layers=self.model_config.unfreeze_last_n_layers,
+                unfreeze_patterns=self.model_config.unfreeze_patterns,
+            )
+            if report:
+                # Gradient checkpointing raises "none of the inputs require grad" when a
+                # frozen prefix feeds a checkpointed block. _build_lora_module already
+                # calls this; the non-LoRA path has not.
+                if not self._is_lora and hasattr(module, "enable_input_require_grads"):
+                    module.enable_input_require_grads()
+                if self.rank == 0:
+                    # print, not logger.info: this module's logger defaults to WARN, and
+                    # which parameters are training is the one thing that must be visible.
+                    print(format_report(report), flush=True)
+
         # Apply QAT before FSDP wrapping (training only)
         if self._qat_enabled and not self.engine_config.forward_only:
             module = self._apply_qat(module)
