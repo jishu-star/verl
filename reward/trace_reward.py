@@ -11,7 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Parse a <plan> reasoning trace into typed records.
+"""Extract and parse the <plan> reasoning trace from a completion.
+
+Counterpart to reward/teds.py, which takes the <table> half of the same completion.
+Between them the two halves are disjoint: teds.py strips <plan> before looking for a
+table, and extract_trace here stops at <table before looking for trace lines, so
+neither can score the other's text.
 
 The trace is four sections of indented lines. This turns each line into a record whose
 KEY is its identity and whose VALUE is its attributes, so the two can be scored apart:
@@ -30,16 +35,46 @@ rather than raising, because this runs on model output.
 
 import re
 
-__all__ = ["parse_trace", "render_trace", "SECTIONS"]
+__all__ = ["extract_trace", "parse_trace", "render_trace", "SECTIONS"]
 
 SECTIONS = ("headers", "row groups", "merged", "empty")
 
 _PLAN_RE = re.compile(r"<plan>(.*?)</plan>", re.S)
+_PLAN_OPEN_RE = re.compile(r"<plan>", re.I)
+_THINK_RE = re.compile(r"<think>.*?</think>", re.S)
+_TABLE_OPEN_RE = re.compile(r"<table[^>]*>", re.I)
 _SEC_RE = re.compile(r"^(headers|row groups|merged|empty):\s*(.*)$")
 _SPAN_RE = re.compile(r"\s\[(?:(\d+)r x (\d+)c|(\d+) cols|(\d+) rows)\]$")
 _SECTION_TAG = " (section)"
 _PATH_SEP = " › "
 _EMPTY_SEP = "  /  "
+
+
+def extract_trace(completion):
+    """-> (trace body, n_plan_blocks, truncated). Mirrors teds.extract_table.
+
+    <think> is dropped first. A well-formed completion has one <plan>...</plan>; a
+    rollout cut off by max_response_length has an opening tag and no closing one, and
+    its partial trace is still worth scoring -- discarding it would give every truncated
+    rollout in a GRPO group the same score, hence zero advantage and no gradient.
+
+    The recovered body stops at the first <table so a missing </plan> cannot swallow the
+    HTML into the trace. Returns (None, 0, False) when there is no <plan> at all, which
+    is distinct from an empty trace: one is a missing answer, the other is an answer of
+    'nothing to report'.
+    """
+    completion = _THINK_RE.sub("", completion or "")
+    closed = _PLAN_RE.findall(completion)
+    if closed:
+        return closed[0], len(closed), False
+    opened = _PLAN_OPEN_RE.search(completion)
+    if not opened:
+        return None, 0, False
+    body = completion[opened.end():]
+    table = _TABLE_OPEN_RE.search(body)
+    if table:
+        body = body[: table.start()]
+    return body, 0, True
 
 
 def _split_span(line):
