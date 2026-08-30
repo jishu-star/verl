@@ -23,7 +23,13 @@ from omegaconf import OmegaConf
 
 from verl.trainer.distillation import is_distillation_enabled
 from verl.trainer.ppo.ray_trainer import RayPPOTrainer
-from verl.trainer.ppo.utils import create_rl_dataset, create_rl_sampler, need_critic, need_reference_policy
+from verl.trainer.ppo.utils import (
+    create_rl_dataset,
+    create_rl_sampler,
+    need_critic,
+    need_reference_policy,
+    resolve_ref_in_actor,
+)
 from verl.utils.config import validate_config
 
 
@@ -41,10 +47,7 @@ class BaseTaskRunner:
         actor_rollout_cls = ActorRolloutRefWorker
         ray_worker_group_cls = RayWorkerGroup
 
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        ref_in_actor = resolve_ref_in_actor(config)
         # Ref policy is fused into ActorRolloutRefWorker unless LoRA is used with a dedicated ref model.
         if need_reference_policy(config) and not ref_in_actor:
             role = Role.ActorRolloutRef

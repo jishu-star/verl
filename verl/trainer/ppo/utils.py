@@ -79,6 +79,28 @@ def need_reference_policy(
     return config.algorithm.get("use_kl_in_reward", False) or config.actor_rollout_ref.actor.use_kl_loss
 
 
+def resolve_ref_in_actor(config) -> bool:
+    """Is the KL reference the actor with LoRA adapters disabled, rather than a real copy?
+
+    With pure LoRA the base weights are genuinely frozen, so "actor with adapters off" IS
+    the original model, and holding a second copy is wasted memory. That stops being true
+    the moment base weights are trained (model.unfreeze_last_n_layers /
+    model.unfreeze_patterns): the reference would then contain the very training the KL
+    term exists to measure against, leaving those parameters unconstrained.
+
+    model.ref_in_actor overrides: False forces a real frozen copy, null keeps the
+    LoRA-derived default.
+    """
+    model = config.actor_rollout_ref.model
+    override = model.get("ref_in_actor", None)
+    if override is not None:
+        return bool(override)
+    lora_rank = model.get("lora", {}).get("rank", 0)
+    if lora_rank <= 0:
+        lora_rank = model.get("lora_rank", 0)
+    return lora_rank > 0 or model.get("lora_adapter_path") is not None
+
+
 def need_teacher_policy(
     config: DictConfig,
 ) -> bool:

@@ -71,6 +71,7 @@ from verl.trainer.ppo.utils import (
     need_critic,
     need_reference_policy,
     need_teacher_policy,
+    resolve_ref_in_actor,
 )
 from verl.trainer.ppo.v1.replay_buffer import DAPO_FILTERED_REWARD_COUNTS_KEY, ReplayBuffer, ReplayBufferAsync
 from verl.trainer.ppo.v1.utils import MetricsAggregator, compute_advantage_for_multi_trajectories
@@ -316,10 +317,7 @@ class PPOTrainer(ABC):
         logger.info("actor and ref model engine initialized")
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
-        lora_rank = self.config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = self.config.actor_rollout_ref.model.get("lora_rank", 0)
-        self.ref_in_actor = lora_rank > 0 or self.config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        self.ref_in_actor = resolve_ref_in_actor(self.config)
         if self.use_reference_policy and not self.ref_in_actor:
             self.ref_policy_wg = all_wg[str(actor_role)]
         if self.ref_in_actor:
@@ -742,10 +740,7 @@ class PPOTrainer(ABC):
         self.mapping = {}
 
         # Add actor rollout worker to mapping
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        ref_in_actor = resolve_ref_in_actor(config)
 
         role = Role.ActorRolloutRef if need_reference_policy(config) and not ref_in_actor else Role.ActorRollout
         self.role_worker_mapping[role] = ray.remote(ActorRolloutRefWorker)

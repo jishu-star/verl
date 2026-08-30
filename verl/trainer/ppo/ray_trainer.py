@@ -58,6 +58,7 @@ from verl.trainer.ppo.utils import (
     need_reference_policy,
     need_reward_model,
     need_teacher_policy,
+    resolve_ref_in_actor,
 )
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
@@ -354,10 +355,7 @@ class RayPPOTrainer:
         )
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
-        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
-        if lora_rank <= 0:
-            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
-        self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        self.ref_in_actor = resolve_ref_in_actor(config)
 
         # define in-reward KL control
         # kl loss control currently not suppoorted
