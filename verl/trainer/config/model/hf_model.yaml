@@ -54,6 +54,24 @@ exclude_modules: null
 # Path to pre-trained LoRA adapter to load for continued training
 lora_adapter_path: null
 
+# Regexes for parameters to freeze before training, matched with re.search against
+# parameter names. Example: ['visual'] freezes the vision tower. A pattern matching
+# nothing raises rather than passing silently.
+freeze_patterns: []
+
+# Unfreeze the last N decoder layers of the language model. Applied after
+# freeze_patterns, and after LoRA wrapping (which freezes every base parameter).
+unfreeze_last_n_layers: 0
+
+# Additional regexes for parameters to unfreeze, applied last.
+unfreeze_patterns: []
+
+# Whether the KL reference is the actor with LoRA adapters disabled. null keeps verl's
+# default, which is true whenever LoRA is enabled. Set false to force a real frozen copy;
+# this is required when base weights are unfrozen, because "actor with adapters off" then
+# contains the training the KL term is supposed to measure against.
+ref_in_actor: null
+
 # whether to use liger. Only valid when we use hf model definition
 use_liger: False
 

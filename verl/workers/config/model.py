@@ -133,6 +133,30 @@ class HFModelConfig(BaseConfig):
 
     # path to pre-trained LoRA adapter to load for continued training
     lora_adapter_path: Optional[str] = None
+
+    # ---- selective parameter training ------------------------------------------------
+    # Applied in order: freeze_patterns, then unfreeze_last_n_layers, then
+    # unfreeze_patterns. Patterns are regexes matched against parameter names with
+    # re.search, so '.*visual.*' and 'visual' are equivalent. A pattern that matches
+    # nothing raises, because a freeze flag that silently does nothing is worse than no
+    # flag at all.
+
+    # regexes for parameters to freeze before training, e.g. ['visual'] for the ViT
+    freeze_patterns: list[str] = field(default_factory=list)
+
+    # unfreeze the last N decoder layers of the language model (0 disables)
+    unfreeze_last_n_layers: int = 0
+
+    # additional regexes for parameters to unfreeze
+    unfreeze_patterns: list[str] = field(default_factory=list)
+
+    # Whether the KL reference is the actor with LoRA adapters disabled.
+    # null keeps verl's default (true whenever LoRA is enabled). Set false to force a
+    # real frozen copy -- required when base weights are unfrozen, since "actor with
+    # adapters off" then contains the very training the KL is meant to measure against.
+    ref_in_actor: Optional[bool] = None
+    # -----------------------------------------------------------------------------------
+
     use_liger: bool = False
 
     use_fused_kernels: bool = False
