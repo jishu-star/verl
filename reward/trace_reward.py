@@ -447,7 +447,12 @@ def content_reward(completion, gt_plan, detail=False):
         vals += [v for _, v, _ in parts]
         spans += [sp for _, _, sp in parts if sp is not None]
     live = [x for x in per.values() if x is not None]
-    out["content"] = sum(live) / len(live) if live else 1.0
+    if not live:
+        # Every section 'none' on both sides -- one table in 50,000. Nothing was asserted
+        # and nothing was missed, so the diagnostics are vacuously perfect too; leaving
+        # them at 0 would plot a perfect match as a total failure.
+        return {"content": 1.0, "key_f1": 1.0, "value_acc": 1.0, "span_acc": 1.0}
+    out["content"] = sum(live) / len(live)
     out["key_f1"] = sum(keys) / len(keys) if keys else 0.0
     out["value_acc"] = sum(vals) / len(vals) if vals else 0.0
     # Restricted to records where a span actually exists on either side. 63.1% of header
