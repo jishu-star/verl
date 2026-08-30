@@ -35,9 +35,9 @@ module, and run against a ``device_map='meta'`` model to check patterns before a
 import re
 from collections import OrderedDict
 
-__all__ = ["apply_param_groups", "format_report", "num_hidden_layers_of"]
+__all__ = ["apply_param_groups", "decoder_stack_prefix", "format_report", "num_hidden_layers_of"]
 
-_LAYER_RE = re.compile(r"\.layers\.(\d+)\.")
+_LAYER_RE = re.compile(r"^(.*)\.layers\.(\d+)\.")
 
 
 def num_hidden_layers_of(hf_config) -> int:
@@ -61,16 +61,42 @@ def num_hidden_layers_of(hf_config) -> int:
     return int(n)
 
 
-def _layer_index(name: str):
-    m = _LAYER_RE.search(name)
-    return int(m.group(1)) if m else None
+def _split_layer(name: str):
+    """-> (stack prefix, layer index), or (None, None)."""
+    m = _LAYER_RE.match(name)
+    return (m.group(1), int(m.group(2))) if m else (None, None)
 
 
-def _group_of(name: str) -> str:
+def decoder_stack_prefix(named) -> str:
+    """Which `<prefix>.layers.<n>.` namespace is the decoder.
+
+    More than one exists in real checkpoints. Qwen3.5-9B has `model.language_model.layers`
+    (426 tensors) alongside `mtp.layers` (11), the multi-token-prediction head. Matching
+    `.layers.<n>.` blindly would fold the MTP head into the decoder and mis-number the
+    stack, so the namespace holding the most parameters wins and is named in the report.
+    """
+    counts: dict[str, int] = {}
+    for name, _ in named:
+        prefix, idx = _split_layer(name)
+        if prefix is not None:
+            counts[prefix] = counts.get(prefix, 0) + 1
+    if not counts:
+        return ""
+    return max(counts, key=counts.get)
+
+
+def _layer_index(name: str, prefix: str = None):
+    p, i = _split_layer(name)
+    if p is None or (prefix is not None and p != prefix):
+        return None
+    return i
+
+
+def _group_of(name: str, prefix: str = None) -> str:
     """A coarse bucket for the report: 'visual', 'layers.24', or the leading path."""
     if "visual" in name or "vision" in name:
         return "visual"
-    i = _layer_index(name)
+    i = _layer_index(name, prefix)
     if i is not None:
         return f"layers.{i}"
     parts = [p for p in name.split(".") if p not in ("base_model", "model", "weight", "bias")]
@@ -110,9 +136,10 @@ def apply_param_groups(
         return found
 
     # ---- which layer indices count as "the last N" ---------------------------------
+    stack = decoder_stack_prefix(named)
     last_layers: set[int] = set()
     if unfreeze_last_n_layers > 0:
-        present = {i for i in (_layer_index(n) for n, _ in named) if i is not None}
+        present = {i for i in (_layer_index(n, stack) for n, _ in named) if i is not None}
         if not present:
             raise ValueError(
                 "unfreeze_last_n_layers is set but no parameter name matches "
@@ -134,7 +161,7 @@ def apply_param_groups(
     for name, param in named:
         if freeze_patterns and _matched(freeze_patterns, name):
             param.requires_grad_(False)
-        if last_layers and _layer_index(name) in last_layers:
+        if last_layers and _layer_index(name, stack) in last_layers:
             param.requires_grad_(True)
         if unfreeze_patterns and _matched(unfreeze_patterns, name):
             param.requires_grad_(True)
@@ -162,12 +189,12 @@ def apply_param_groups(
     # ---- report ---------------------------------------------------------------------
     groups: OrderedDict[str, list[int]] = OrderedDict()
     for name, param in named:
-        g = groups.setdefault(_group_of(name), [0, 0])
+        g = groups.setdefault(_group_of(name, stack), [0, 0])
         g[0 if param.requires_grad else 1] += param.numel()
     trainable = sum(g[0] for g in groups.values())
     total = trainable + sum(g[1] for g in groups.values())
     return {"groups": groups, "trainable": trainable, "total": total,
-            "pattern_hits": hits, "last_layers": sorted(last_layers)}
+            "pattern_hits": hits, "last_layers": sorted(last_layers), "decoder_stack": stack}
 
 
 def _fmt(n: int) -> str:
@@ -178,24 +205,44 @@ def _fmt(n: int) -> str:
 
 
 def format_report(report: dict) -> str:
-    """Human-readable summary, with contiguous decoder layers collapsed into ranges."""
+    """Human-readable summary, decoder layers sorted and collapsed into contiguous ranges.
+
+    Sorting is not cosmetic: a checkpoint's weight map is in shard order, not layer order,
+    so grouping as encountered fragments `layers.24-31` into a dozen scattered rows and
+    the one thing the report exists to show -- which layers train -- becomes unreadable.
+    """
     if not report:
         return "selective training: disabled (all parameters trainable)"
-    rows, run = [], None
+
+    def state_of(train, frozen):
+        return "trainable" if train and not frozen else ("frozen" if frozen and not train else "mixed")
+
+    layers, others = {}, []
     for name, (train, frozen) in report["groups"].items():
-        state = "trainable" if train and not frozen else ("frozen" if frozen and not train else "mixed")
-        i = int(name.split(".")[1]) if name.startswith("layers.") else None
-        if run and i is not None and run[3] == state and i == run[2] + 1:
+        if name.startswith("layers."):
+            layers[int(name.split(".")[1])] = (train, frozen)
+        else:
+            others.append((name, train, frozen))
+
+    rows, run = [], None
+    for i in sorted(layers):
+        train, frozen = layers[i]
+        st = state_of(train, frozen)
+        if run and run[3] == st and i == run[2] + 1:
             run[2], run[4], run[5] = i, run[4] + train, run[5] + frozen
             continue
         if run:
             rows.append(run)
-        run = ["layers" if i is not None else name, i, i, state, train, frozen]
+        run = ["layers", i, i, st, train, frozen]
     if run:
         rows.append(run)
+    rows += [[n, None, None, state_of(t, f), t, f] for n, t, f in others]
 
     out = [f"selective training: {_fmt(report['trainable'])} / {_fmt(report['total'])} trainable "
            f"({100 * report['trainable'] / max(report['total'], 1):.1f}%)"]
+    if report.get("last_layers"):
+        out.append(f"  decoder stack: {report['decoder_stack']}.layers"
+                   f"  (unfrozen: {report['last_layers'][0]}-{report['last_layers'][-1]})")
     for label, lo, hi, state, train, frozen in rows:
         name = label if lo is None else (f"layers.{lo}" if lo == hi else f"layers.{lo}-{hi}")
         out.append(f"  {name:<28} {_fmt(train + frozen):>10}   {state}")

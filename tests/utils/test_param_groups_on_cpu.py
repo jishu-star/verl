@@ -20,7 +20,12 @@ checked anywhere, including on a machine with no GPU stack installed.
 
 import unittest
 
-from verl.utils.param_groups import apply_param_groups, num_hidden_layers_of
+from verl.utils.param_groups import (
+    apply_param_groups,
+    decoder_stack_prefix,
+    format_report,
+    num_hidden_layers_of,
+)
 
 
 class MockParam:
@@ -98,6 +103,28 @@ class TestParamGroups(unittest.TestCase):
 
     def test_disabled_by_default(self):
         self.assertEqual(apply_param_groups(MockModule(NAMES), MockHFConfig), {})
+
+    def test_mtp_head_is_not_mistaken_for_the_decoder(self):
+        """Qwen3.5 ships mtp.layers.0 beside model.language_model.layers.0-31.
+
+        Matching `.layers.<n>.` blindly folds the multi-token-prediction head into the
+        decoder stack and mis-numbers it, so the namespace with the most parameters wins.
+        """
+        names = NAMES + [f"mtp.layers.0.{p}" for p in ("mlp.down_proj.weight", "self_attn.q_proj.weight")]
+        self.assertEqual(decoder_stack_prefix(MockModule(names).named_parameters()),
+                         "model.language_model")
+        m = MockModule(names, requires_grad=False)
+        apply_param_groups(m, MockHFConfig, unfreeze_last_n_layers=32)
+        self.assertFalse(any(n.startswith("mtp.") for n in trainable(m)))
+
+    def test_report_sorts_layers_into_ranges(self):
+        """Weight maps come in shard order, so the report must sort before collapsing."""
+        shuffled = [LM[i] for i in (17, 3, 30, 0, 25, 9)] + VISION[:2]
+        m = MockModule(shuffled, requires_grad=False)
+        report = apply_param_groups(m, MockHFConfig, unfreeze_patterns=[r"layers\.30\."])
+        lines = format_report(report).splitlines()
+        self.assertTrue(any("layers.30" in ln and "trainable" in ln for ln in lines))
+        self.assertEqual([ln for ln in lines if "layers." in ln][0].split()[0], "layers.0")
 
     # ---- the failure modes this module exists to make loud -------------------------
     def test_pattern_matching_nothing_raises(self):
