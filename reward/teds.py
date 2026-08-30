@@ -55,6 +55,7 @@ HARD_MAX = 1200
 
 _TABLE_RE = re.compile(r"<table[^>]*>.*?</table>", re.S | re.I)
 _THINK_RE = re.compile(r"<think>.*?</think>", re.S)
+_PLAN_RE = re.compile(r"<plan>.*?</plan>", re.S)
 _WS_RE = re.compile(r"\s+")
 
 
@@ -220,13 +221,20 @@ def _grid_agreement(gt_html, pred_html):
 def extract_table(completion):
     """The first complete <table>...</table>, or a truncated one recovered from <table.
 
+    <think> and <plan> are removed FIRST. The trace quotes cell text verbatim in its
+    `merged` and `empty` sections, so a table containing markup-like content -- or, far
+    more commonly, an early-training policy emitting a stray tag mid-plan -- puts a
+    `<table` inside the plan block. Searching the raw completion then scores the reward
+    against whatever fragment appeared in the reasoning rather than the answer: measured
+    at 0.055 on a table that was in fact perfect.
+
     A rollout that hits max_response_length has no closing tag. Returning nothing for
     those makes every truncated rollout in a GRPO group score identically, which is an
     advantage of exactly zero and no gradient from the samples that most need one. lxml
     parses the recovered fragment; the missing rows then show up as deletions, which is
     what TEDS is for.
     """
-    completion = _THINK_RE.sub("", completion or "")
+    completion = _PLAN_RE.sub("", _THINK_RE.sub("", completion or ""))
     found = _TABLE_RE.findall(completion)
     if found:
         return found[0], len(found), False
