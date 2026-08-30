@@ -35,7 +35,8 @@ rather than raising, because this runs on model output.
 
 import re
 
-__all__ = ["extract_trace", "find_section_keys", "parse_trace", "render_trace",
+__all__ = ["content_reward", "extract_trace", "find_section_keys", "match_section",
+           "parse_trace", "render_trace",
            "schema_reward", "SECTIONS"]
 
 SECTIONS = ("headers", "row groups", "merged", "empty")
@@ -228,3 +229,231 @@ def schema_reward(completion):
     """
     found = find_section_keys(completion)
     return sum(found.values()) / len(SECTIONS)
+
+
+# ---------------------------------------------------------------- content
+# Text similarity is duplicated from teds.py rather than imported: verl loads a reward
+# file by path with load_extern_object, so relative imports inside the package are not
+# guaranteed to resolve.
+def _norm_levenshtein(a, b, cap=200):
+    a, b = a[:cap], b[:cap]
+    if a == b:
+        return 0.0
+    if not a or not b:
+        return 1.0
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1] / max(len(a), len(b))
+
+
+def _text_sim(a, b):
+    return 1.0 - _norm_levenshtein(a, b)
+
+
+# Below this, two texts are different cells rather than one cell spelled badly, and
+# pairing them would let an unrelated prediction absorb a ground-truth record.
+MATCH_FLOOR = 0.5
+ALPHA = 0.5          # weight on "found the right cell" vs "described it correctly"
+
+
+def _span_sim(a, b):
+    """Graded, per axis. Predicting colspan 3 when the truth is 4 really is closer than
+    predicting 1, and exact match throws that gradient away."""
+    r = 1.0 - abs(a["rowspan"] - b["rowspan"]) / max(a["rowspan"], b["rowspan"])
+    c = 1.0 - abs(a["colspan"] - b["colspan"]) / max(a["colspan"], b["colspan"])
+    return 0.5 * r + 0.5 * c
+
+
+def _parent(rec):
+    return rec["path"][-2] if len(rec["path"]) > 1 else None
+
+
+def _value_sim(section, a, b):
+    if section == "empty":
+        return 1.0                                  # key-only section
+    s = _span_sim(a, b)
+    if section == "merged":
+        return s                                    # flat: no parent to compare
+    pa, pb = _parent(a), _parent(b)
+    if pa is None and pb is None:
+        p = 1.0
+    elif pa is None or pb is None:
+        p = 0.0
+    else:
+        p = _text_sim(pa, pb)
+    return 0.5 * s + 0.5 * p
+
+
+def _key_sim(section, a, b):
+    if section == "empty":
+        row = _text_sim(a["row"], b["row"])
+        pa, pb = a["path"], b["path"]
+        if not pa and not pb:
+            path = 1.0
+        elif not pa or not pb:
+            path = 0.0
+        else:
+            path = _text_sim(" › ".join(pa), " › ".join(pb))
+        return 0.5 * row + 0.5 * path
+    s = _text_sim(a["text"], b["text"])
+    if section == "row groups" and a.get("is_section") != b.get("is_section"):
+        return 0.0            # a banner and a stub label are different kinds of node
+    return s
+
+
+def _pair_sim(section, a, b):
+    k = _key_sim(section, a, b)
+    if k < MATCH_FLOOR:
+        return 0.0, 0.0, 0.0
+    v = _value_sim(section, a, b)
+    return k * (ALPHA + (1.0 - ALPHA) * v), k, v
+
+
+def _hungarian(cost):
+    """Minimum-cost assignment, O(n^2 m). Rows must not outnumber columns.
+
+    Exact rather than greedy: 31.5% of tables repeat a header text, and greedy pairing
+    can lock an early near-tie into a choice that blocks a better global one. n is capped
+    at MAXLIST=40 records per section, so the exact algorithm costs nothing.
+    """
+    n, m = len(cost), len(cost[0])
+    INF = float("inf")
+    u, v, p, way = [0.0] * (n + 1), [0.0] * (m + 1), [0] * (m + 1), [0] * (m + 1)
+    for i in range(1, n + 1):
+        p[0] = i
+        j0 = 0
+        minv, used = [INF] * (m + 1), [False] * (m + 1)
+        while True:
+            used[j0] = True
+            i0, delta, j1 = p[j0], INF, -1
+            for j in range(1, m + 1):
+                if used[j]:
+                    continue
+                cur = cost[i0 - 1][j - 1] - u[i0] - v[j]
+                if cur < minv[j]:
+                    minv[j], way[j] = cur, j0
+                if minv[j] < delta:
+                    delta, j1 = minv[j], j
+            for j in range(m + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while j0:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+    return [(p[j] - 1, j - 1) for j in range(1, m + 1) if p[j]]
+
+
+def _identity(section, r):
+    if section == "empty":
+        return ("empty", r["row"], r["path"])
+    return (section, r["text"], r["rowspan"], r["colspan"],
+            r.get("is_section"), _parent(r))
+
+
+def _drain_identical(section, gt, pred, parts):
+    """Remove record pairs identical on both sides, appending a perfect match for each."""
+    from collections import Counter
+    pool = Counter(_identity(section, r) for r in pred)
+    gt_left, matched = [], Counter()
+    for r in gt:
+        k = _identity(section, r)
+        if pool[k] > matched[k]:
+            matched[k] += 1
+            trivial = (section == "empty" or (r["rowspan"] == 1 and r["colspan"] == 1))
+            parts.append((1.0, 1.0, None if trivial else 1.0))
+        else:
+            gt_left.append(r)
+    pred_left, used = [], Counter()
+    for r in pred:
+        k = _identity(section, r)
+        if used[k] < matched[k]:
+            used[k] += 1
+        else:
+            pred_left.append(r)
+    return gt_left, pred_left
+
+
+def match_section(section, gt, pred):
+    """-> (matched mass, [(key_sim, value_sim, span_sim_or_None) per matched pair]).
+
+    span_sim is None for pairs where neither side carries a span, so the caller can
+    restrict to the records that actually test span understanding."""
+    if not gt or not pred:
+        return 0.0, []
+
+    # Fast path: pull out records that are IDENTICAL on both sides before doing any
+    # fuzzy work. Such a pair scores the maximum 1.0, so an exchange argument says some
+    # optimal assignment contains it -- removing it first cannot lose optimality. Most
+    # records in a good prediction match exactly, and this avoids running an edit
+    # distance over every candidate pair, which was 90% of the cost.
+    total, parts = 0.0, []
+    gt, pred = _drain_identical(section, gt, pred, parts)
+    if not gt or not pred:
+        return float(len(parts)), parts
+    total = float(len(parts))
+
+    flip = len(gt) > len(pred)
+    a, b = (pred, gt) if flip else (gt, pred)
+    cost = [[-_pair_sim(section, x, y)[0] for y in b] for x in a]
+    for i, j in _hungarian(cost):
+        x, y = (a[i], b[j]) if not flip else (b[j], a[i])
+        s, k, val = _pair_sim(section, x, y)
+        if s > 0:
+            total += s
+            trivial = (section == "empty" or
+                       (x["rowspan"] == 1 and x["colspan"] == 1
+                        and y["rowspan"] == 1 and y["colspan"] == 1))
+            parts.append((k, val, None if trivial else _span_sim(x, y)))
+    return total, parts
+
+
+def content_reward(completion, gt_plan, detail=False):
+    """Score the K:V pairs inside each section against the ground-truth trace.
+
+    Returns the macro-average F1 over the sections that carry records on at least one
+    side. Sections empty on BOTH sides are excluded rather than scored 1.0: `merged` is
+    empty in 46.2% of tables and `empty` in 71.3%, so crediting them would put a large
+    unearned floor under every trace including a wrong one.
+    """
+    gt = parse_trace(gt_plan)
+    pred = parse_trace(completion)
+    out = {"content": 0.0, "key_f1": 0.0, "value_acc": 0.0, "span_acc": 0.0}
+    if gt is None or pred is None:
+        return out          # no trace emitted at all is a zero, not a vacuous match
+    per, keys, vals, spans = {}, [], [], []
+    for s in SECTIONS:
+        g, p = gt[s], pred[s]
+        if not g and not p:
+            per[s] = None
+            continue
+        if not g or not p:
+            per[s] = 0.0
+            continue
+        mass, parts = match_section(s, g, p)
+        precision, recall = mass / len(p), mass / len(g)
+        per[s] = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        keys += [k for k, _, _ in parts]
+        vals += [v for _, v, _ in parts]
+        spans += [sp for _, _, sp in parts if sp is not None]
+    live = [x for x in per.values() if x is not None]
+    out["content"] = sum(live) / len(live) if live else 1.0
+    out["key_f1"] = sum(keys) / len(keys) if keys else 0.0
+    out["value_acc"] = sum(vals) / len(vals) if vals else 0.0
+    # Restricted to records where a span actually exists on either side. 63.1% of header
+    # cells are plain 1x1, so an unrestricted value score is 89% satisfied by predicting
+    # "no span" everywhere; this one cannot be guessed.
+    out["span_acc"] = sum(spans) / len(spans) if spans else 1.0
+    if detail:
+        out["per_section"] = per
+    return out
