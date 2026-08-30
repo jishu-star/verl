@@ -45,7 +45,9 @@ _PLAN_RE = re.compile(r"<plan>(.*?)</plan>", re.S)
 _PLAN_OPEN_RE = re.compile(r"<plan>", re.I)
 _THINK_RE = re.compile(r"<think>.*?</think>", re.S)
 _TABLE_OPEN_RE = re.compile(r"<table[^>]*>", re.I)
+_TABLE_RE_ANY = re.compile(r"<table[^>]*>.*?(?:</table>|$)", re.S | re.I)
 _SEC_RE = re.compile(r"^(headers|row groups|merged|empty):\s*(.*)$")
+_ANY_SECTION_RE = re.compile(r"^[ \t]*(headers|row[ _]groups|merged|empty)[ \t]*:", re.I | re.M)
 _SPAN_RE = re.compile(r"\s\[(?:(\d+)r x (\d+)c|(\d+) cols|(\d+) rows)\]$")
 _SECTION_TAG = " (section)"
 _PATH_SEP = " › "
@@ -100,8 +102,14 @@ def parse_trace(text):
     """
     if text is None:
         return None
-    m = _PLAN_RE.search(text)
-    body = m.group(1) if m else (text if _SEC_RE.match(text.strip()[:20] or "x") else None)
+    body, _, _ = extract_trace(text)
+    if body is None:
+        # No <plan> wrapper. This never happens for the ground truth, which is emitted
+        # through structure_plan.wrap(), but a MODEL may write the four sections and omit
+        # the tags, and those sections are still a trace worth scoring. The table is
+        # stripped first so cell text cannot be read as trace lines.
+        stripped = _TABLE_RE_ANY.sub("", text)
+        body = stripped if _ANY_SECTION_RE.search(stripped) else None
     if body is None:
         return None
 
@@ -214,9 +222,6 @@ def find_section_keys(completion):
     if body is None:
         body = _TABLE_RE_ANY.sub("", completion or "")
     return {name: bool(rx.search(body)) for name, rx in _KEY_RES.items()}
-
-
-_TABLE_RE_ANY = re.compile(r"<table[^>]*>.*?(?:</table>|$)", re.S | re.I)
 
 
 def schema_reward(completion):
