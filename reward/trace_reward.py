@@ -35,7 +35,8 @@ rather than raising, because this runs on model output.
 
 import re
 
-__all__ = ["extract_trace", "parse_trace", "render_trace", "SECTIONS"]
+__all__ = ["extract_trace", "find_section_keys", "parse_trace", "render_trace",
+           "schema_reward", "SECTIONS"]
 
 SECTIONS = ("headers", "row groups", "merged", "empty")
 
@@ -184,3 +185,46 @@ def render_trace(parsed, truncated=(), none=()):
                 lines.append("  " + "  " * r["depth"] + r["text"]
                              + _fmt_span(r["rowspan"], r["colspan"]) + tag)
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- schema
+# `row groups` is the only two-word key; accept an underscore for it, since that is a
+# spelling a model will reach for and it identifies the section just as unambiguously.
+_KEY_RES = {
+    "headers":    re.compile(r"^[ \t]*headers[ \t]*:", re.I | re.M),
+    "row groups": re.compile(r"^[ \t]*row[ _]groups[ \t]*:", re.I | re.M),
+    "merged":     re.compile(r"^[ \t]*merged[ \t]*:", re.I | re.M),
+    "empty":      re.compile(r"^[ \t]*empty[ \t]*:", re.I | re.M),
+}
+
+
+def find_section_keys(completion):
+    """-> {section: bool} for the four keys, searched in the trace half of a completion.
+
+    Searched inside <plan> when there is one, otherwise in the completion with any
+    <table> removed. The table is removed because cell text is arbitrary and a table with
+    a row reading `Empty:` would otherwise mint a section key out of data.
+
+    Whatever follows the colon is ignored -- that is content, scored elsewhere. Matching
+    is case-insensitive and tolerates leading whitespace, so this measures whether the
+    four keys are RECOVERABLE, not whether they are typeset exactly.
+    """
+    body, _, _ = extract_trace(completion)
+    if body is None:
+        body = _TABLE_RE_ANY.sub("", completion or "")
+    return {name: bool(rx.search(body)) for name, rx in _KEY_RES.items()}
+
+
+_TABLE_RE_ANY = re.compile(r"<table[^>]*>.*?(?:</table>|$)", re.S | re.I)
+
+
+def schema_reward(completion):
+    """Fraction of the four section keys that can be extracted from the output.
+
+    0, 0.25, 0.5, 0.75 or 1.0 -- graded rather than all-or-nothing, because a rollout
+    that produces three of four keys must outrank one that produces none. Under GRPO an
+    all-or-nothing term collapses to a constant across a group that all fail, and a
+    constant reward is an advantage of zero.
+    """
+    found = find_section_keys(completion)
+    return sum(found.values()) / len(SECTIONS)
