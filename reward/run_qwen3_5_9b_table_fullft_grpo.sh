@@ -136,11 +136,16 @@ DATA=(
 )
 
 REWARD=(
+    # NOTE the leading + on reward_kwargs: reward.yaml declares only path and name
+    # under custom_reward_function, so hydra struct mode rejects the weights as
+    # undeclared keys.  They ARE read -- trainer/ppo/reward.py:81 does
+    # reward_fn_config.get("reward_kwargs", {}) -- so + attaches them where the
+    # loader looks, rather than silently dropping them.
     reward.custom_reward_function.path=reward/table_reward.py
     reward.custom_reward_function.name=compute_score
-    reward.custom_reward_function.reward_kwargs.w_html=${W_HTML}
-    reward.custom_reward_function.reward_kwargs.w_schema=${W_SCHEMA}
-    reward.custom_reward_function.reward_kwargs.w_content=${W_CONTENT}
+    +reward.custom_reward_function.reward_kwargs.w_html=${W_HTML}
+    +reward.custom_reward_function.reward_kwargs.w_schema=${W_SCHEMA}
+    +reward.custom_reward_function.reward_kwargs.w_content=${W_CONTENT}
     reward.num_workers=${REWARD_WORKERS}
 )
 
