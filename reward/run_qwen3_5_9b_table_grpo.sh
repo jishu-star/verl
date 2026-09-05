@@ -43,6 +43,16 @@ W_HTML=${W_HTML:-0.75}
 W_SCHEMA=${W_SCHEMA:-0.05}
 W_CONTENT=${W_CONTENT:-0.20}
 
+# --- reward parallelism ---
+# MEASURED on the real corpus: compute_score is 3.7 s mean / 15 s p90 per call, because
+# APTED runs twice per table (structure-only 0.63 s, then with-text 3.2 s).  One GRPO step
+# is TRAIN_BATCH * ROLLOUT_N calls -- 512 by default, i.e. ~1900 core-seconds.
+# reward.num_workers is real process parallelism: RewardLoopManager spawns this many Ray
+# actors and static-chunks the batch across them (experimental/reward_loop/reward_loop.py
+# :324-352).  Set it near the box's vCPU count or the reward, not the GPUs, sets step time.
+REWARD_WORKERS=${REWARD_WORKERS:-$(( $(nproc) * 3 / 4 ))}
+if (( REWARD_WORKERS < 8 )); then REWARD_WORKERS=8; fi
+
 # --- sequence budget, from the measured corpus ---
 # visual tokens are capped at 4096 in data prep (Qwen3.5: patch 16, merge 2 -> 32x32 px
 # per token); target p99 is 3231 tokens, max 6295.
@@ -60,9 +70,10 @@ mkdir -p logs "${CKPTS_DIR}"
 for f in "${TRAIN_FILE}" "${TEST_FILE}"; do
     if [[ ! -f "${f}" ]]; then
         echo "MISSING: ${f}" >&2
-        echo "Build it first: the parquet must carry an 'images' column of file paths, a" >&2
-        echo "prompt containing <image>, reward_model.ground_truth = minified canonical" >&2
-        echo "HTML, and extra_info.plan = the ground-truth <plan> text." >&2
+        echo "Build it with:  python stage5/build_parquet.py   (in table_exps/)" >&2
+        echo "It emits an 'images' column of absolute file paths -- fine on one node or a" >&2
+        echo "shared filesystem.  For multi-node without one, rebuild with" >&2
+        echo "--image-mode bytes so the images travel inside the parquet." >&2
         exit 1
     fi
 done
@@ -106,7 +117,7 @@ REWARD=(
     reward.custom_reward_function.reward_kwargs.w_html=${W_HTML}
     reward.custom_reward_function.reward_kwargs.w_schema=${W_SCHEMA}
     reward.custom_reward_function.reward_kwargs.w_content=${W_CONTENT}
-    reward.num_workers=16                   # TEDS is CPU-bound; this is the parallelism
+    reward.num_workers=${REWARD_WORKERS}    # TEDS is CPU-bound; this is the parallelism
 )
 
 # LoRA + full-rank tail + a real reference model.
