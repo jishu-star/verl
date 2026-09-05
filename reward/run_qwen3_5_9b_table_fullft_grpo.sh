@@ -40,7 +40,7 @@ ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.35}   # lower than LoRA: optimize
 # freeze_patterns is re.search against parameter names, and a pattern matching NOTHING
 # raises (utils/param_groups.py) -- so these are self-checking, not hopeful.
 #
-#   'visual'        -> 0.43 B, the whole vision tower (333 tensors, verified in the
+#   'visual'        -> 456 M, the whole vision tower (333 tensors, verified in the
 #                      checkpoint weight map). Never trains.
 #   'embed_tokens'  -> 1.02 B. vocab is 248,320 x 4096; AdamW keeps dense fp32 moments
 #   'lm_head'       -> 1.02 B. for every row of both, which is ~32 GB of optimizer state
@@ -48,7 +48,13 @@ ROLLOUT_GPU_MEM_UTIL=${ROLLOUT_GPU_MEM_UTIL:-0.35}   # lower than LoRA: optimize
 #                      also anchors the output distribution, which is worth something now
 #                      that there is no KL doing it.
 #
-# FREEZE_EMBEDDINGS=0 trains them anyway: 9.36 B trainable instead of 7.32 B.
+# FREEZE_EMBEDDINGS=0 trains them anyway: ~8.96 B trainable instead of 6.92 B.
+#
+# MEASURED at startup on the real checkpoint, not computed from config.json:
+#   selective training: 6.92 B / 9.41 B trainable (73.5%)
+# An earlier comment here said 7.32 B / 9.79 B (74.8%), derived by summing config.json
+# dimensions.  The freeze targeting was right, the arithmetic was not.  Trust the report
+# the run prints, not any number written here.
 FREEZE_EMBEDDINGS=${FREEZE_EMBEDDINGS:-1}
 if [[ "${FREEZE_EMBEDDINGS}" == "1" ]]; then
     FREEZE_PATTERNS="['visual','embed_tokens','lm_head']"
@@ -232,8 +238,8 @@ TRAINER=(
     trainer.val_before_train=True
     trainer.save_freq=10                     # halved: no KL means a bad run diverges fast
     trainer.test_freq=10
-    # A full-rank checkpoint is ~108 GB (bf16 model 19.6 + fp32 master 29.3 + Adam m,v
-    # 58.6), against ~2 GB for a LoRA one.  Retention defaults to null = keep every
+    # A full-rank checkpoint is ~100 GB (bf16 model 18.8 + fp32 master 27.7 + Adam m,v
+    # 55.4), against ~2 GB for a LoRA one.  Retention defaults to null = keep every
     # single save, so save_freq=10 fills a 1 TB disk after ~90 steps.
     trainer.max_actor_ckpt_to_keep=${MAX_CKPT:-3}
     trainer.total_epochs=2
