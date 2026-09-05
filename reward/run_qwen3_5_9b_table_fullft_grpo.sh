@@ -92,7 +92,12 @@ if [[ "${OFFLOAD}" == "1" ]]; then OFF=True; else OFF=False; fi
 LR=${LR:-5e-7}
 
 # --- sequence budget, from the measured corpus ---
-MAX_PROMPT_LEN=${MAX_PROMPT_LEN:-4608}
+# 4608 was sized for a 32-token prompt.  The plan grammar is now specified in the prompt
+# itself (389 tokens), so a 4096-visual-token row needs 4096+389+~20 template = ~4505 --
+# only ~100 tokens of slack, and data.truncation=error turns any overflow into a dead
+# step rather than a warning.  The visual cap is what actually bounds prompt size, so the
+# headroom is free.
+MAX_PROMPT_LEN=${MAX_PROMPT_LEN:-5120}
 MAX_RESPONSE_LEN=${MAX_RESPONSE_LEN:-4096}
 TRAIN_BATCH=${TRAIN_BATCH:-64}
 ROLLOUT_N=${ROLLOUT_N:-8}
