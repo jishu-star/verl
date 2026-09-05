@@ -208,6 +208,10 @@ TRAINER=(
     trainer.val_before_train=True
     trainer.save_freq=10                     # halved: no KL means a bad run diverges fast
     trainer.test_freq=10
+    # A full-rank checkpoint is ~108 GB (bf16 model 19.6 + fp32 master 29.3 + Adam m,v
+    # 58.6), against ~2 GB for a LoRA one.  Retention defaults to null = keep every
+    # single save, so save_freq=10 fills a 1 TB disk after ~90 steps.
+    trainer.max_actor_ckpt_to_keep=${MAX_CKPT:-3}
     trainer.total_epochs=2
 )
 
