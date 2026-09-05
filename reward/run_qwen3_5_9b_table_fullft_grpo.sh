@@ -180,6 +180,12 @@ ACTOR=(
     actor_rollout_ref.actor.use_dynamic_bsz=False
     actor_rollout_ref.actor.use_kl_loss=False        # <-- no ref worker is built at all
     actor_rollout_ref.actor.entropy_coeff=0
+    # Compute entropy for LOGGING without adding it to the loss.  trainer_base.py:1733
+    # gates it on `actor.calculate_entropy or entropy_coeff != 0`, so with the coeff at 0
+    # the actor/entropy panel is simply absent -- and with no KL term, a falling entropy
+    # is the earliest sign the rollouts are collapsing to identical samples, which zeroes
+    # the GRPO advantage and stalls learning while every other metric still looks fine.
+    actor_rollout_ref.actor.calculate_entropy=True
     actor_rollout_ref.actor.clip_ratio=0.2           # now the ONLY leash on step size
     actor_rollout_ref.actor.grad_clip=1.0
     actor_rollout_ref.actor.use_torch_compile=False
