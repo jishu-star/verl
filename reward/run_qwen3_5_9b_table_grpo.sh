@@ -60,6 +60,19 @@ MAX_PROMPT_LEN=${MAX_PROMPT_LEN:-4608}
 MAX_RESPONSE_LEN=${MAX_RESPONSE_LEN:-4096}
 TRAIN_BATCH=${TRAIN_BATCH:-64}
 ROLLOUT_N=${ROLLOUT_N:-8}
+# --- PPO update granularity ---
+# ppo_mini_batch_size is in PROMPTS: ray_trainer.py:1351 multiplies it by rollout.n
+# before dispatch, so TRAIN_BATCH / PPO_MINI_BATCH is the number of gradient updates
+# per step.  Hardcoding it meant overriding TRAIN_BATCH alone failed validation
+# (train_batch_size must be >= ppo_mini_batch_size, workers/config/actor.py:226).
+# Derive it instead, keeping the 4-updates-per-step ratio at any batch size, then
+# floor it so mini * rollout_n still gives every data-parallel rank a sequence.
+PPO_MINI_BATCH=${PPO_MINI_BATCH:-$(( TRAIN_BATCH / 4 ))}
+(( PPO_MINI_BATCH < 1 )) && PPO_MINI_BATCH=1
+MIN_MINI=$(( (NDEVICES_PER_NODE * NNODES + ROLLOUT_N - 1) / ROLLOUT_N ))
+(( PPO_MINI_BATCH < MIN_MINI )) && PPO_MINI_BATCH=${MIN_MINI}
+(( PPO_MINI_BATCH > TRAIN_BATCH )) && PPO_MINI_BATCH=${TRAIN_BATCH}
+
 ########################### end user-adjustable ###########################
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -146,7 +159,7 @@ MODEL=(
 
 ACTOR=(
     actor_rollout_ref.actor.optim.lr=1e-6
-    actor_rollout_ref.actor.ppo_mini_batch_size=16
+    actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH}
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     actor_rollout_ref.actor.use_dynamic_bsz=False
     actor_rollout_ref.actor.use_kl_loss=True
