@@ -48,7 +48,13 @@ _TABLE_OPEN_RE = re.compile(r"<table[^>]*>", re.I)
 _TABLE_RE_ANY = re.compile(r"<table[^>]*>.*?(?:</table>|$)", re.S | re.I)
 _SEC_RE = re.compile(r"^(headers|row groups|merged|empty):\s*(.*)$")
 _ANY_SECTION_RE = re.compile(r"^[ \t]*(headers|row[ _]groups|merged|empty)[ \t]*:", re.I | re.M)
-_SPAN_RE = re.compile(r"\s\[(?:(\d+)r x (\d+)c|(\d+) cols|(\d+) rows)\]$")
+# Singular is accepted on input even though _fmt_span only ever writes the plural: a
+# model writes the grammatical "[1 col]" / "[2 row]", and rejecting those was silently
+# costing it twice -- the span was dropped AND the bracket stayed glued to the text, so
+# a correctly-identified cell could never match. 8.9% of emitted `merged` entries and a
+# share of `row groups` were lost this way. Ground truth is unaffected: _fmt_span emits
+# a bracket only when the span exceeds 1, and always plural.
+_SPAN_RE = re.compile(r"\s\[(?:(\d+)r x (\d+)c|(\d+) cols?|(\d+) rows?)\]$")
 _SECTION_TAG = " (section)"
 _PATH_SEP = " › "
 _EMPTY_SEP = "  /  "
