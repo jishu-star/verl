@@ -1202,6 +1202,19 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     position_ids_rmpad = position_ids.values().unsqueeze(1)  # (4, 1, total_nnz)
                 else:
                     position_ids_rmpad = position_ids.values().unsqueeze(0)  # (1, total_nnz)
+                # DBG-MROPE: temporary. Fires ONLY on an anomalous layout, silent otherwise.
+                # mRoPE rows must lead (shape[0]==4) and the packed length must match input_ids.
+                if (position_ids_rmpad.dim() == 3 and position_ids_rmpad.shape[0] != 4) or (
+                    position_ids_rmpad.shape[-1] != input_ids_rmpad.shape[-1]
+                ):
+                    print(
+                        f"[DBG-MROPE-ANOMALY] rank={getattr(self, 'rank', -1)} "
+                        f"in.dim={position_ids.dim()} in.shape={tuple(position_ids.shape)} "
+                        f"values={tuple(position_ids.values().shape)} "
+                        f"pos_rmpad={tuple(position_ids_rmpad.shape)} "
+                        f"ids_rmpad={tuple(input_ids_rmpad.shape)}",
+                        flush=True,
+                    )
             else:
                 raise NotImplementedError(f"pad_mode {pad_mode} not implemented")
 
