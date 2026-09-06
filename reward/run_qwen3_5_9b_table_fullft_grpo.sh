@@ -96,9 +96,13 @@ LR=${LR:-5e-7}
 # itself (389 tokens), so a 4096-visual-token row needs 4096+389+~20 template = ~4505 --
 # only ~100 tokens of slack, and data.truncation=error turns any overflow into a dead
 # step rather than a warning.  The visual cap is what actually bounds prompt size, so the
-# headroom is free.
+# headroom is free.  Measured worst case over the 40 largest images: 4534.
 MAX_PROMPT_LEN=${MAX_PROMPT_LEN:-5120}
-MAX_RESPONSE_LEN=${MAX_RESPONSE_LEN:-4096}
+# 4096 truncated 62% of held-out rollouts, and a cut-off table scores ~0 on TEDS however
+# good the plan was.  Targets (plan + canonical HTML) measured over all 63,816 rows:
+# p50 2176, p95 4340, p99 5529, max 10550.  8192 covers >99.9%; at 4096 -> 8192 the
+# held-out truncated rate went 0.307 -> 0.016 and has_table 0.910 -> 1.000.
+MAX_RESPONSE_LEN=${MAX_RESPONSE_LEN:-8192}
 TRAIN_BATCH=${TRAIN_BATCH:-64}
 ROLLOUT_N=${ROLLOUT_N:-8}
 # --- PPO update granularity ---
